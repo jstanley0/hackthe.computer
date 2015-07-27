@@ -1,0 +1,365 @@
+#!/usr/bin/ruby
+
+require 'matrix'
+require 'set'
+
+class Contact
+	attr_accessor :nets
+	def initialize
+		@nets = []
+	end
+	
+	def read(file)
+		net_lines = []
+		while (line = file.gets)
+			line.chomp!
+			if line.empty? && !net_lines.empty?
+				@nets << Net.new(net_lines)
+				net_lines.clear
+			else
+				net_lines << line
+			end
+		end
+		@nets << Net.new(net_lines) unless net_lines.empty?
+	end
+	
+	def solve
+		signatures_seen = {}
+		@nets.each do |net|
+			cube = Cube.new(net)
+			signatures_seen[cube.size] ||= Set.new
+			sig = cube.signature
+			unless signatures_seen[cube.size].include? sig
+				# remember all orientations of this cube
+				# so we will recognize it next time we see it
+				signatures_seen[cube.size] << sig
+				cube.other_orientations do |other|
+					signatures_seen[cube.size] << other.signature
+				end
+				# output this cube as an Original
+				net.original.each { |line| puts line }
+				puts
+			end
+		end
+	end
+end
+
+class Net
+	attr_accessor :matrix, :size, :width, :height, :original
+	
+	def initialize(lines)
+		@original = lines.clone
+		lines.map!(&:chomp)
+		net_height = lines.count
+		net_width = lines.map(&:size).max
+		text_matrix = Matrix::rows(lines.map do |line|
+			(line + (' ' * net_width))[0...net_width].chars.to_a
+		end)
+		@size = compute_size(net_width, net_height)
+		raise "non-integral size" unless @size.integer?
+		@width = net_width / @size
+		@height = net_height / @size
+		@matrix = Matrix::build(@height, @width) do |row, col|
+			mat = text_matrix.minor(row * @size, @size, col * @size, @size)
+			if mat.all? { |char| char != ' ' }
+				Face.new(mat)
+			else
+				nil
+			end
+		end
+		raise "invalid face count" unless @matrix.count { |face| !face.nil? } == 6
+		link_faces
+	end
+
+	# figure out the size of the faces by the size of the net	
+	def compute_size(*dimensions)
+		dimensions.sort!
+		if dimensions[1] * 3 == dimensions[0] * 4
+			dimensions[1] / 4
+		elsif dimensions[1] * 2 == dimensions[0] * 5
+			dimensions[1] / 5		
+		else
+			raise "invalid aspect ratio!"
+		end
+	end
+
+	def link_faces
+		@matrix.each_with_index do |face, row, col|
+			if face
+				face.net_face!
+				face.up    = row > 0 && face(row - 1, col)
+				face.left  = col > 0 && face(row, col - 1)
+				face.right = col < @width - 1 && face(row, col + 1)
+				face.down  = row < @height - 1 && face(row + 1, col)
+			end
+		end
+	end
+
+	def face(row, col)
+		@matrix[row, col]
+	end
+
+	def print(stream, explode)
+		for r in 0...@height
+			for sr in 0...@size
+				line = ''
+				for c in 0...@width
+					for sc in 0...@size
+						line += (face(r, c) ? face(r,c).matrix[sr, sc] : ' ')
+					end
+					line += ' ' if explode
+				end
+				stream.puts line.rstrip
+			end
+			stream.puts if explode
+		end
+		stream.puts
+	end
+	
+	def first_face
+		@matrix.detect { |face| !face.nil? }
+	end
+end
+
+class Face
+	attr_accessor :matrix
+	attr_accessor :up, :left, :right, :down
+	
+	def initialize(matrix, signature = '')
+		raise "not square" unless matrix.square?
+		@matrix = matrix
+		@signature = signature
+	end
+	
+	def applied?
+		@applied
+	end
+	
+	def applied!
+		@applied = true
+	end
+	
+	def net_face?
+		@net_face
+	end
+	
+	def net_face!
+		@net_face = true
+	end
+	
+	def size
+		@matrix.row_count
+	end
+	
+	def inspect
+		@matrix.row_vectors.map { |row| row.to_a.join }.join("/");
+	end
+	
+	def rotate_cw!
+		raise "can't rotate net face" if net_face?
+		new_matrix = Matrix::build(size, size) do |row, col|
+			@matrix[size - col - 1, row]
+		end
+		@matrix = new_matrix
+		self
+	end
+	
+	def rotate_ccw!
+		raise "can't rotate net face" if net_face?
+		new_matrix = Matrix::build(size, size) do |row, col|
+			@matrix[col, size - row - 1]
+		end
+		@matrix = new_matrix
+		self
+	end
+	
+	def rotate_180!
+		raise "can't rotate net face" if net_face?
+		new_matrix = Matrix::build(size, size) do |row, col|
+			@matrix[size - row - 1, size - col - 1]
+		end
+		@matrix = new_matrix
+		self
+	end
+	
+	def ==(other)
+		@matrix == other.matrix
+	end
+	
+	def clone
+		Face.new(@matrix.clone, @signature)
+	end
+end
+
+class Cube
+	attr_accessor :size, :top, :bottom, :left, :right, :front, :back, :net
+	
+	def faces
+		[@top, @bottom, @front, @right, @back, @left]
+	end
+		
+	def initialize(net)
+		#net.print STDOUT, true
+		@net = net.original.join("\n")
+		@size = net.size
+		wrap(net.first_face)
+		raise "oh kwap" unless faces.all?
+	end
+	
+	def ==(rhs)
+		@top == rhs.top && @left == rhs.left && @back == rhs.back && @right == rhs.right &&
+			@front == rhs.front && @bottom == rhs.bottom
+	end
+	
+	def wrap(face)
+		raise "face already applied!" unless @top.nil?
+		face.applied!
+		@top = face.clone
+		if face.up && !face.up.applied?
+			rotate_x_ccw
+			wrap face.up
+			rotate_x_cw
+		end
+		if face.down && !face.down.applied?
+			rotate_x_cw
+			wrap face.down
+			rotate_x_ccw
+		end
+		if face.left && !face.left.applied?
+			rotate_y_cw
+			wrap face.left
+			rotate_y_ccw
+		end
+		if face.right && !face.right.applied?
+			rotate_y_ccw
+			wrap face.right
+			rotate_y_cw
+		end
+	end
+	
+	# front moves to top
+	def rotate_x_cw
+		tmp = @top
+		@top = @front
+		@front = @bottom
+		@bottom = @back
+		@bottom.rotate_180! if @bottom
+		@back = tmp
+		@back.rotate_180! if @back
+		@right.rotate_cw! if @right
+		@left.rotate_ccw! if @left
+	end
+	
+	# back moves to top
+	def rotate_x_ccw
+		tmp = @top
+		@top = @back
+		@top.rotate_180! if @top
+		@back = @bottom
+		@back.rotate_180! if @back
+		@bottom = @front
+		@front = tmp
+		@right.rotate_ccw! if @right
+		@left.rotate_cw! if @left
+	end
+	
+	# left moves to top
+	def rotate_y_cw
+		tmp = @top
+		@top = @left
+		@top.rotate_cw! if @top
+		@left = @bottom
+		@left.rotate_cw! if @left
+		@bottom = @right
+		@bottom.rotate_cw! if @bottom
+		@right = tmp
+		@right.rotate_cw! if @right
+		@front.rotate_cw! if @front
+		@back.rotate_ccw! if @back
+	end
+	
+	# right moves to top
+	def rotate_y_ccw
+		tmp = @top
+		@top = @right
+		@top.rotate_ccw! if @top
+		@right = @bottom
+		@right.rotate_ccw! if @right
+		@bottom = @left
+		@bottom.rotate_ccw! if @bottom
+		@left = tmp
+		@left.rotate_ccw! if @left
+		@front.rotate_ccw! if @front
+		@back.rotate_cw! if @back
+	end
+	
+	# right moves to front
+	def rotate_z_cw
+		tmp = @front
+		@front = @right
+		@right = @back
+		@back = @left
+		@left = tmp
+		@top.rotate_cw! if @top
+		@bottom.rotate_ccw! if @bottom
+	end
+	
+	# left moves to front
+	def rotate_z_ccw
+		tmp = @front
+		@front = @left
+		@left = @back
+		@back = @right
+		@right = tmp
+		@top.rotate_ccw! if @top
+		@bottom.rotate_cw! if @bottom
+	end
+	
+	# the block is called 23 times with a clone cube in each possible orientation
+	# other than the one passed in
+	def other_orientations
+		c = self.clone
+		# top on top
+		c.rotate_z_cw
+		3.times { yield c; c.rotate_z_cw }
+
+		# left on top
+		c.rotate_y_cw
+		4.times { yield c; c.rotate_z_cw }
+
+		# back on top
+		c.rotate_x_ccw
+		4.times { yield c; c.rotate_z_cw }
+
+		# right on top
+		c.rotate_x_ccw
+		4.times { yield c; c.rotate_z_cw }
+
+		# front on top
+		c.rotate_x_ccw
+		4.times { yield c; c.rotate_z_cw }
+
+		# bottom on top
+		c.rotate_y_cw
+		3.times { yield c; c.rotate_z_cw }
+		yield c
+	end
+	
+	def signature
+		faces.map { |face| face.matrix.to_a.flatten }.flatten.join
+	end
+end
+
+if __FILE__ == $0
+	if ARGV.include? 'halp'
+		$contact = Contact.new
+		$contact.read(File.open('contact.txt'))
+		require 'byebug'
+		debugger
+	else
+		$contact = Contact.new
+		$contact.read(STDIN)
+		$contact.solve
+	end
+end
+

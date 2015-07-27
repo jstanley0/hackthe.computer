@@ -1,0 +1,159 @@
+#!/usr/bin/ruby
+
+require 'rexml/document'
+
+class Point
+	attr_accessor :x, :y
+	def initialize(x, y)
+		@x, @y = x, y
+	end
+end
+
+class Line
+	attr_accessor :a, :b
+	
+	def initialize(x0, y0, x1, y1)
+		@a = Point.new(x0, y0)
+		@b = Point.new(x1, y1)
+	end
+
+	def on_vertex?(other_line)
+		@a.x == other_line.a.x && @a.y == other_line.a.y || @a.x == other_line.b.x && @a.y == other_line.b.y
+	end
+	
+	def intersect?(other_line)
+		ccw?(@a, other_line.a, other_line.b) != ccw?(@b, other_line.a, other_line.b) &&
+			ccw?(@a, @b, other_line.a) != ccw?(@a, @b, other_line.b)
+	end
+	
+private
+	def ccw?(a,b,c)
+		(c.y-a.y) * (b.x-a.x) > (b.y-a.y) * (c.x-a.x)
+	end
+end
+
+class SVG
+	attr_reader :lines
+	
+	def load
+		data = ''
+		until (line = gets).chomp.empty?
+			data << line
+		end
+
+		parse(data)
+	end
+
+private
+	def parse(data)
+		doc = REXML::Document.new(data)
+		path = doc.elements.each('svg/path') {}.detect { |el| el.attributes['id'] == 'compound' }.attributes['d']
+		raise "No compound path found" unless path
+		parse_path(path)
+	end
+
+	def parse_path(path)
+		#STDERR.puts "parsing path: '#{path}'"
+		x = 0
+		y = 0
+		@lines = []
+		path.scan(/[MmLlHhVvZz][^MmLlHhVvZz]*/).each do |command_seq|
+			#STDERR.puts "command sequence: '#{command_seq}'"
+			command = command_seq[0]
+			args = command_seq[1..-1].scan(/[+\-]?\d+(?:\.\d+)?(?:[Ee]\d+)?/).map!(&:to_f)
+			#STDERR.puts args.inspect
+
+			case command
+			when 'M'
+				raise "incorrect number of arguments for M" unless args.size == 2
+				x = args[0]
+				y = args[1]
+			when 'm'
+				raise "incorrect number of arguments for m" unless args.size == 2
+				x += args[0]
+				y += args[1]
+			when 'L'
+				raise "incorrect number of arguments for m" unless args.size.even?
+				args.each_slice(2) do |coords|
+					next unless coords[1]
+					add_line(x, y, coords[0], coords[1])
+					x, y = coords
+				end
+			when 'l'
+				raise "incorrect number of arguments for m" unless args.size.even?
+				args.each_slice(2) do |coords|
+					next if coords[1].nil?
+					x0, y0 = x, y
+					x, y = coords[0] + x, coords[1] + y
+					add_line(x0, y0, x, y)
+				end				
+			when 'H'
+				args.each do |x1|
+					add_line(x, y, x1, y)
+					x = x1
+				end
+			when 'h'
+				args.each do |dx|
+					x0 = x
+					x += dx
+					add_line(x0, y, x, y)
+				end			
+			when 'V'
+				args.each do |y1|
+					add_line(x, y, x, y1)
+					y = y1
+				end		
+			when 'v'
+				args.each do |dy|
+					y0 = y
+					y += dy
+					add_line(x, y0, x, y)
+				end							
+			when 'Z', 'z'
+				add_line(x, y, first_line.a.x, first_line.a.y)
+			else
+				raise "unknown command: " + command
+			end
+		end
+		
+		#STDERR.puts "added #{@lines.size} lines"
+	end
+	
+	def add_line(x0, y0, x1, y1)
+		@lines << Line.new(x0, y0, x1, y1)
+	end
+	
+	def first_line
+		@lines.first
+	end
+end
+
+class Fencing
+	def run
+		svg = SVG.new
+		svg.load
+		# try to make our line segment probably not colinear with an edge :P
+		@maxX = svg.lines.map { |line| [line.a.x, line.b.x] }.flatten.max + 2
+		@maxY = svg.lines.map { |line| [line.a.y, line.b.y] }.flatten.max + 1
+		#STDERR.puts "max extents: #{@maxX}, #{@maxY}"
+		while (line = gets) =~ /^(\S+)(?:\s|,)*(\S+)/
+			puts check_point(svg, $1.to_f, $2.to_f).to_s
+		end
+	end
+	
+	private
+	
+	def check_point(svg, x, y)
+		test_line = Line.new(x, y, @maxX, @maxY)
+		count = 0
+		svg.lines.each do |line|
+			return true if test_line.on_vertex? line
+			count += 1 if test_line.intersect? line
+		end
+		count.odd?
+	end
+end
+
+if __FILE__ == $0
+	Fencing.new.run
+end

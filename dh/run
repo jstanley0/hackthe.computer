@@ -1,0 +1,93 @@
+#!/usr/bin/ruby
+
+require 'openssl'
+
+$privkey = 7 # this might not be very secure
+$prime = 30637775445823436879454952454237901621829966657401721746070860651817441339168005303717538436267761925943508219262505232611113257484851150568506213078797989702585789761985016603411556671624578696738516904789548864160394831287627817317795838688739893928409073583196284357604505649990517750570165846353611753076552790863204543854051580045397850821877292938328081777878940113256091409340060270095566957589497638300091443155492672066747993613750763002148357864768189629663838591806566186778994459586522266584981205390297672287705399674114572450098637137403303995202577718744551714538059154961659624442327783807941820722227
+$base = 2
+$outbound_nonce = 0
+$inbound_nonce = (2 ** 96) - 1
+
+$pubkey = $base.to_bn.mod_exp($privkey, $prime)
+
+#STDERR.puts "my public key is #{$pubkey}"
+
+def do_hello
+	hello = STDIN.gets.chomp
+	raise "unexpected hello: '#{hello}'" unless hello == "SimpleSSLv0"
+	$client_pubkey = STDIN.gets.to_i(16)
+	#STDERR.puts "client's public key is #{$client_pubkey}"
+	STDOUT.puts "OK"
+	STDOUT.puts "%x" % $pubkey
+	STDOUT.flush
+end
+
+def compute_session_key
+	session_id = $client_pubkey.to_bn.mod_exp($privkey, $prime)
+	session_id = "%0514x" % session_id
+	#STDERR.puts "session key (prior to sha256) is #{session_id}"
+	session_id = [session_id].pack('H*')
+	session_id = OpenSSL::Digest::SHA256.digest session_id
+	$session_key = session_id[0..15]
+	#STDERR.puts "session key is #{$session_key.unpack("H*")[0]}"
+end
+
+def next_inbound_nonce
+	retval = ["%24x" % $inbound_nonce].pack("H*")
+	$inbound_nonce -= 1
+	retval
+end
+
+def next_outbound_nonce
+	retval = ["%24x" % $outbound_nonce].pack("H*")
+	$outbound_nonce += 1
+	retval
+end
+
+def decrypt(message, iv = next_inbound_nonce)
+	raise 'message too short' if message.size <= 16
+	$decipher ||= OpenSSL::Cipher.new('aes-128-gcm')
+	$decipher.reset
+	$decipher.decrypt
+	$decipher.key = $session_key
+	$decipher.iv = iv
+	$decipher.auth_tag = message[-16..-1]
+	$decipher.auth_data = ''
+	$decipher.update(message[0...-16]) + $decipher.final
+end
+
+def encrypt(message, iv = next_outbound_nonce)
+	$cipher ||= OpenSSL::Cipher.new('aes-128-gcm')
+	$cipher.reset
+	$cipher.encrypt
+	$cipher.key = $session_key
+	$cipher.iv = iv
+	message = $cipher.update(message) + $cipher.final
+	message + $cipher.auth_tag
+end
+
+def do_request
+	size = STDIN.read(4)
+	return false unless size && size.length == 4
+	size = size.unpack("H*")[0].to_i(16)
+	#STDERR.puts "inbound message size: #{size}"
+	message = STDIN.read(size)
+	decrypted_message = decrypt(message)
+	#STDERR.puts "decrypted message: #{decrypted_message}"
+	
+	encrypted_message = encrypt(decrypted_message)
+	size = ["%08x" % encrypted_message.size].pack("H*")
+	STDOUT.write size
+	STDOUT.write encrypted_message
+	STDOUT.flush
+	true
+end
+
+STDIN.set_encoding("BINARY")
+
+if __FILE__ == $0
+	do_hello
+	compute_session_key
+	while do_request
+	end
+end

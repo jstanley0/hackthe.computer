@@ -1,0 +1,65 @@
+#!/usr/bin/ruby
+
+require 'json'
+
+class NSA
+	def initialize(min_group_size, stream)
+		@io = IO.popen("./nsa", "w+")
+		@io.puts min_group_size
+		@next_id = 0
+		@people = {}
+		@people_ids = {}  # reverse mapping from person to id
+
+		data = JSON.parse stream.read
+		data.each do |friend_pair|
+			raise "wat" unless friend_pair.size == 2
+			id0 = find_or_add_person(friend_pair[0])
+			id1 = find_or_add_person(friend_pair[1])
+			@io.puts id0.to_s + " " + id1.to_s
+		end	
+		@io.close_write
+	end
+
+	def solve
+		@cliques = []
+		clique = []
+		while (line = @io.gets)
+			line.chomp!
+			if line.empty?
+				break if clique.empty?
+				@cliques << clique
+				clique = []
+			else
+				clique << @people[line.to_i]
+			end
+		end
+		@cliques << clique unless clique.empty?
+
+		print_cliques
+	end
+	
+private
+	def find_or_add_person(name)
+		@people_ids[name] || add_person(name)
+	end
+
+	def add_person(name)
+		id = @next_id
+		@next_id += 1
+		@people[id] = name
+		@people_ids[name] = id
+		id
+	end
+	
+	def print_cliques
+		puts @cliques.to_json
+	end
+end
+
+if __FILE__ == $0
+	min_group_size = ARGV.detect { |arg| arg =~ /--minimal-group-size=(\d+)/ } && $1
+	raise "missing --minimal-group-size=N parameter" unless min_group_size
+	NSA.new(min_group_size.to_i, STDIN).solve
+end
+
+
